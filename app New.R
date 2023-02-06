@@ -1,4 +1,9 @@
 options(shiny.maxRequestSize=30*1024^2)
+options(
+  gargle_oauth_email = TRUE,
+  gargle_oauth_cache = ".secrets"
+)
+
 library(shiny)
 library(semantic.dashboard)
 library(dplyr)
@@ -13,7 +18,8 @@ library(DT)
 library(xlsx)
 library(plotly)
 library("webshot")
-
+library("googledrive")
+library(easycsv)
 get_mapping <- function(){
   Mapping <- read_excel("Input Files/Mapping.xlsx")
   Mapping <- Mapping[,c("JIRA Projects Name","Cluster Group Name","PMO Projects Name")]
@@ -37,11 +43,13 @@ get_table_style<- function(wb, sheet_number, row_number,col_number){
   return(wb)
 }
 pre_process_jira_data  <- function(jira_data){
-  jira_data[!is.na(jira_data$`Activity Logs`),]$`Activity Logs` <- "Yes"
-  jira_data[is.na(jira_data$`Activity Logs`),]$`Activity Logs` <- "No"
-  jira_data[which(jira_data$`Activity Type` == "Admin- Leave" ),]$`Activity Logs`= "Yes"
-  jira_data[is.na(jira_data$`Work Description`),]$`Work Description` <- ""
-  jira_data[str_detect(jira_data$`Work Description`, "JIRALog:"),]$`Activity Logs` = "Yes"
+  if (nrow(jira_data[jira_data$`Activity Logs`=='',])>0) jira_data[jira_data$`Activity Logs`=='',]$`Activity Logs`="No"
+  if (nrow(jira_data[!str_detect(jira_data$`Activity Logs`, "No"),])>0) jira_data[!str_detect(jira_data$`Activity Logs`, "No"),]$`Activity Logs` = "Yes"
+  if (nrow(jira_data[str_detect(jira_data$`Activity Logs`, "itemId"),])>0) jira_data[str_detect(jira_data$`Activity Logs`, "itemId"),]$`Activity Logs` = "Yes"
+  
+  if (nrow(jira_data[which(jira_data$`Activity Type` == "Admin- Leave" ),])>0) jira_data[which(jira_data$`Activity Type` == "Admin- Leave" ),]$`Activity Logs`= "Yes"
+  if (nrow(jira_data[str_detect(jira_data$`Work Description`, "JIRALog:"),])>0) jira_data[str_detect(jira_data$`Work Description`, "JIRALog:"),]$`Activity Logs` = "Yes"
+  
   jira_data$`Emp Code` = apply(data.frame(jira_data$`Full name`),1,function(x)gsub('.*-', '',x))
   jira_data$`Emp Code` = trimws(jira_data$`Emp Code`)
   
@@ -351,15 +359,11 @@ print_CWRL<- function(cluster_wise_resource_logging){
   CWRL=CWRL[,cwrl_order]
 }
 print_bar_plot <- function(cluster_wise_summary){
-  # x <- c('Product A', 'Product B', 'Product C')
-  # y <- c(20, 14, 23)
-  # y2 <- c(16,12,27)
-  # text <- c('27% market share', '24% market share', '19% market share')
-  # data <- data.frame(x, y, y2, text)
+  
+  
   colnames(cluster_wise_summary)[colnames(cluster_wise_summary)=="Daily %age"] = "day_percentage"
   colnames(cluster_wise_summary)[colnames(cluster_wise_summary)=="JLA %age"] = "jla_percentage"
   
-  # colnames(cluster_wise_summary)[colnames(cluster_wise_summary)=="Groups"] = "Group"
   
   
   fig <- cluster_wise_summary %>% plot_ly()
@@ -371,7 +375,8 @@ print_bar_plot <- function(cluster_wise_summary){
                            text = cluster_wise_summary$jla_percentage, textposition = 'auto',
                            marker = list(color = 'rgb(58,200,225)',
                                          line = list(color = 'rgb(8,48,107)', width = 1.5)))
-  fig <- fig %>% layout(title = "Mid-day JLA Report",
+  
+  fig <- fig %>% layout(title = title,
                         barmode = 'group',
                         xaxis = list(title = ""),
                         yaxis = list(title = ""))
@@ -398,6 +403,7 @@ ui <- dashboardPage(
         
         box( width=16,status = "primary",# solidHeader = TRUE, title="Table",
              fileInput("pmo_input", "Upload PMO File"),
+             
              br(),
              # tableOutput("table1")
         ),
@@ -418,12 +424,12 @@ ui <- dashboardPage(
         numericInput("day_type", "Select Hours:", 4, min = 4, max = 8),
         actionButton("analysis","Analyze"),
         # downloadButton('downloadData', 'Download Results')
-        actionButton('downloadData', 'Download Results')
+        downloadButton('downloadData', 'Download Results')
         
       ),
       tabItem(
-        tabName = "dashboard", dataTableOutput("summary_table")
-        # fluidRow( dataTableOutput("summary_table")),
+        tabName = "dashboard",
+        plotlyOutput("plot")
         # fluidRow(
         # selectInput("display", "Display data by :", c("Cluster","Project","Team")),
         # dataTableOutput("type_table")
@@ -460,46 +466,63 @@ server <- function(input, output) {
   val$cluster_wise_activity_seg = data.frame
   val$team_wise_summary = data.frame()
   val$project_wise_summary = data.frame()
+  val$pmo_input_file_name =val$jira_file_name = NULL
+  #   input$pmo_input$name
+  # Val$jira_file_name =input$jira_input$name
+  
+  #Empty Directory before uploading new files
+  
+  ###### Save PMO input File
+  observeEvent(input$pmo_input, {
+    val$pmo_input_file_name = input$pmo_input$name
+    drive_upload(media = input$pmo_input$datapath,
+                 name = input$pmo_input$name,overwrite=TRUE)
+  })
+  ###### Save Jira input File
+  observeEvent(input$jira_input, {
+    val$jira_file_name =input$jira_input$name
+    drive_upload(media = input$jira_input$datapath,
+                 name = input$jira_input$name,overwrite=TRUE)
+  })
+  
   observeEvent(input$analysis, {
     jira_data= jira_users= alloc_data =NULL
     
-    ###### Save PMO input File
-    
-    inFile <- input$pmo_input
-    if (!is.null(inFile)) {   
-      dataFile <- read_excel(inFile$datapath, sheet=1)
-      dat <- data.frame(dataFile, stringsAsFactors=FALSE)
-      colnames(dat) <- colnames(dataFile)
-      alloc_data = dat
-      # write.xlsx(dat, file = "pmo_input.xlsx")
+    if (!is.null(val$pmo_input_file_name)  & !is.null(val$jira_file_name))
+    {
+      showModal(modalDialog("Uploading Data on drive....", footer=NULL))
+      #Download Jira File from drive
+      drive_download(val$jira_file_name,overwrite = TRUE)
+      jira_data= read.csv(val$jira_file_name)
+      names(jira_data) <- gsub("."," ",colnames(jira_data),fixed=TRUE )
+      
+      
+      #Download PMO File from drive
+      drive_download(val$pmo_input_file_name,overwrite = TRUE)
+      alloc_data= read_excel(val$pmo_input_file_name, sheet=1)
+      names(alloc_data) <- gsub(x = names(alloc_data),pattern = "\\.",replacement = " ")
+      
+      jira_users= read_excel(val$pmo_input_file_name, sheet=2)
+      names(jira_users) <- gsub(x = names(jira_users),pattern = "\\.",replacement = " ")
+      removeModal()
     }
-    
-    ###### Save Jira input File
-    inFile <- input$jira_input
-    if (!is.null(inFile)) {   
-      Worklogs <- read_excel(inFile$datapath, sheet=1)
-      users <- read_excel(inFile$datapath, sheet=2)
-      
-      dat <- data.frame(Worklogs, stringsAsFactors=FALSE)
-      names(dat) <- gsub(x = names(dat),pattern = "\\.",replacement = " ")
-      jira_data = dat
-      
-      dat <- data.frame(users, stringsAsFactors=FALSE)
-      names(dat) <- gsub(x = names(dat),pattern = "\\.",replacement = " ")
-      jira_users = dat
-      # write.xlsx(dat, file = "jira_input.xlsx")
+    else{
+      showModal(modalDialog(
+        title = "Error",
+        paste("Please upload both PMO file and Jira file"),
+        easyClose = TRUE,
+        footer = NULL
+      ))
     }
     
     ################################
-    
     if (!is.null(jira_data)  & !is.null(alloc_data))
     {
       
       Mapping = get_mapping()
       
-      jira_data$`Work date`=as.Date(jira_data$`Work date`, origin = "1899-12-30")
-      jira_data$`Work date`=strftime(jira_data$`Work date`, format="%Y-%m-%d")
-      jira_data=jira_data[jira_data$`Work date`==input$date,]
+      jira_data$`Work date`=as.Date(jira_data$`Work date`,  "%m/%d/%Y")
+      # jira_data=jira_data[jira_data$`Work date`==input$date,]
       if (nrow(jira_data) > 0 ){
         showModal(modalDialog("Processing....", footer=NULL))
         jira_data = pre_process_jira_data(jira_data)
@@ -537,21 +560,18 @@ server <- function(input, output) {
         val$cluster_wise_activity_seg = get_cluster_activity (jira_activity_data)
         
         # Calculating HOURS Summary Statistics -------------------------------------------------
-        jira_users=jira_users[complete.cases(jira_users$`Full name`),]
+        jira_users=jira_users[complete.cases(jira_users$User),]
         hours_df = data.frame(matrix(nrow=4, ncol=2))
         colnames(hours_df) = c("Type","Count")
         hours_df$Type=c('>= 10 hours','>= 8 hours','>= 1 and < 4 hours','Did Not Log')
         
-        hours_df[hours_df$Type==">= 10 hours",]$Count =length(jira_users[jira_users$`Worked`>=10, ]$`Worked`)
-        hours_df[hours_df$Type==">= 8 hours",]$Count=length(jira_users[jira_users$`Worked`>=8, ]$`Worked`)
-        hours_df[hours_df$Type==">= 1 and < 4 hours",]$Count =length(jira_users[(jira_users$`Worked`>=1 & jira_users$`Worked`<4), ]$`Worked`)
-        hours_df[hours_df$Type=="Did Not Log",]$Count =length(jira_users[jira_users$Worked ==0,]$`Worked`)
+        hours_df[hours_df$Type==">= 10 hours",]$Count =length(jira_users[jira_users$Logged>=10, ]$Logged)
+        hours_df[hours_df$Type==">= 8 hours",]$Count=length(jira_users[jira_users$Logged>=8, ]$Logged)
+        hours_df[hours_df$Type==">= 1 and < 4 hours",]$Count =length(jira_users[(jira_users$Logged>=1 & jira_users$Logged<4), ]$Logged)
+        hours_df[hours_df$Type=="Did Not Log",]$Count =length(jira_users[jira_users$Logged ==0,]$Logged)
         hours_df[nrow(hours_df)+1,] = "NA"
         hours_df$Type[nrow(hours_df)] = "Total Jira Users"
         hours_df[hours_df$Type=="Total Jira Users",]$Count  = nrow(jira_users)
-        # hours_df[hours_df$Type=="Total Head Count",]$Count  = nrow(jira_users)
-        
-        
         
         val$hours_df = hours_df
         removeModal()
@@ -582,75 +602,113 @@ server <- function(input, output) {
     
   })
   
-  observeEvent(input$downloadData, {
-    path=choose.dir()
-    showModal(modalDialog("saving Data!"))
-    file_name = paste(path,"/","NFS Daily Compliance_",as.character(input$date),".xlsx", sep="" )
-    # r_CWS_cols=
-    
-    CWS = print_CWS(val$cluster_wise_summary, as.integer(input$day_type))
-    CWRL =print_CWRL(val$cluster_wise_resource_logging)
-    TWS = print_TWS(val$team_wise_summary)
-    PWS = print_PWS(val$project_wise_summary)
-    if(as.integer(input$day_type)!=8)
-    {
-      # list_of_datasets <- list("Summary" = CWS, 
-      #                          "Cluster wise resource logging" = CWRL)
-      # file_name = paste(path,"/","NFS Mid-day Compliance_",as.character(input$date),".xlsx", sep="" )
-      # openxlsx::write.xlsx(list_of_datasets, file = file_name)
-      wb <- openxlsx::createWorkbook("Summary")
-      openxlsx::addWorksheet(wb, sheet = "Summary", gridLines = TRUE)
-      openxlsx::addWorksheet(wb, "Cluster wise resource logging", gridLines = TRUE)
+  output$downloadData <- downloadHandler(
+    filename = function() { 
+      if(as.integer(input$day_type)!=8)
+      {
+        paste("NFS Mid-day Compliance_",as.character(input$date),".xlsx", sep="" )
+      }
+      else
+      {
+        paste("NFS Daily Compliance_",as.character(input$date),".xlsx", sep="" )
+      }
+    },
+    content = function(file){
+      CWS = print_CWS(val$cluster_wise_summary, as.integer(input$day_type))
+      CWRL =print_CWRL(val$cluster_wise_resource_logging)
+      TWS = print_TWS(val$team_wise_summary)
+      PWS = print_PWS(val$project_wise_summary)
       
-      openxlsx::writeData(wb, sheet = "Summary", CWS, rowNames = FALSE)
-      openxlsx::writeData(wb, sheet = "Cluster wise resource logging" , CWRL, rowNames = FALSE)
+      # set path
+      temp <- setwd(tempdir())
+      on.exit(setwd(temp))
       
-      wb=get_table_style(wb, 1, nrow(CWS),ncol(CWS))
-      wb=get_table_style(wb, 2, nrow(CWRL),ncol(CWRL))
-      openxlsx::saveWorkbook(wb, file_name, overwrite = TRUE)
-      
-      
-      fig=print_bar_plot(val$cluster_wise_summary)
-      export(fig, file = paste(path,"/","chart.png", sep="" ))
+      if(as.integer(input$day_type)!=8)
+      {
+        wb <- openxlsx::createWorkbook("Summary")
+        openxlsx::addWorksheet(wb, sheet = "Summary", gridLines = TRUE)
+        openxlsx::addWorksheet(wb, "Cluster wise resource logging", gridLines = TRUE)
+        
+        openxlsx::writeData(wb, sheet = "Summary", CWS, rowNames = FALSE)
+        openxlsx::writeData(wb, sheet = "Cluster wise resource logging" , CWRL, rowNames = FALSE)
+        
+        wb=get_table_style(wb, 1, nrow(CWS),ncol(CWS))
+        wb=get_table_style(wb, 2, nrow(CWRL),ncol(CWRL))
+        openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
+        
+        
+      }
+      else
+      {
+        wb = createWorkbook()
+        sheet = createSheet(wb, "Summary")
+        
+        addDataFrame(as.data.frame(CWS), sheet=sheet, startColumn=1, row.names=FALSE)
+        addDataFrame(as.data.frame(val$hours_df), sheet=sheet, startColumn=15, row.names=FALSE)
+        addDataFrame(as.data.frame(TWS), sheet=sheet, startRow = 18, startColumn=1, row.names=FALSE)
+        addDataFrame(as.data.frame(PWS), sheet=sheet, startRow = 50, startColumn=1, row.names=FALSE)
+        
+        sheet = createSheet(wb, "Cluster wise resource logging")
+        addDataFrame(as.data.frame(CWRL), sheet=sheet, startColumn=1, row.names=FALSE)
+        
+        sheet = createSheet(wb, "Cluster wise activity")
+        addDataFrame(as.data.frame(val$cluster_wise_activity_seg), sheet=sheet, startColumn=1, row.names=FALSE)
+        
+        saveWorkbook(wb, file)
+        
+        # list_of_datasets <- list("Summary" = CWS,
+        #                        "Cluster wise resource logging" = CWRL,
+        #                        "Cluster wise activity"=val$cluster_wise_activity_seg,
+        #                        "Time Log. Head Count"= val$hours_df)
+      }
       
       
     }
-    else
-    {
-      wb = createWorkbook()
-      sheet = createSheet(wb, "Summary")
-      
-      addDataFrame(as.data.frame(CWS), sheet=sheet, startColumn=1, row.names=FALSE)
-      addDataFrame(as.data.frame(val$hours_df), sheet=sheet, startColumn=15, row.names=FALSE)
-      addDataFrame(as.data.frame(TWS), sheet=sheet, startRow = 18, startColumn=1, row.names=FALSE)
-      addDataFrame(as.data.frame(PWS), sheet=sheet, startRow = 50, startColumn=1, row.names=FALSE)
-      
-      sheet = createSheet(wb, "Cluster wise resource logging")
-      addDataFrame(as.data.frame(CWRL), sheet=sheet, startColumn=1, row.names=FALSE)
-      
-      sheet = createSheet(wb, "Cluster wise activity")
-      addDataFrame(as.data.frame(val$cluster_wise_activity_seg), sheet=sheet, startColumn=1, row.names=FALSE)
-      
-      saveWorkbook(wb, file_name)
-      
-      # list_of_datasets <- list("Summary" = CWS,
-      #                        "Cluster wise resource logging" = CWRL,
-      #                        "Cluster wise activity"=val$cluster_wise_activity_seg,
-      #                        "Time Log. Head Count"= val$hours_df)
-    }
-    
-    showModal(modalDialog("saving finished!"))
-  })
+  )
   
+  
+  output$plot <- renderPlotly({
+    req(  val$cluster_wise_summary)
+    if( nrow( val$cluster_wise_summary) > 1)
+    {
+      
+      cluster_wise_summary =val$cluster_wise_summary
+      if(input$day_type ==8)
+      {title = paste( "Daily Jira Compliance ",as.character(input$date),sep="" )}
+      else 
+      {title = paste( "Mid-day Jira Compliance ",as.character(input$date),sep="" )}
+      cluster_wise_summary$Groups <- factor(cluster_wise_summary$Groups,
+                                            levels = cluster_wise_summary$Groups)
+      colnames(cluster_wise_summary)[colnames(cluster_wise_summary)=="Daily %age"] = "day_percentage"
+      colnames(cluster_wise_summary)[colnames(cluster_wise_summary)=="JLA %age"] = "jla_percentage"
+      
+      
+      fig <- cluster_wise_summary %>% plot_ly()
+      fig <- fig %>% add_trace(x = ~Groups, y = ~day_percentage, type = 'bar', name ="Jira %",
+                               text = cluster_wise_summary$day_percentage, textposition = 'auto',
+                               marker = list(color = 'rgb(158,202,225)',
+                                             line = list(color = 'rgb(8,48,107)', width = 1.5)))
+      fig <- fig %>% add_trace(x = ~Groups, y = ~jla_percentage, type = 'bar',name ="JLA %",
+                               text = cluster_wise_summary$jla_percentage, textposition = 'auto',
+                               marker = list(color = 'rgb(58,200,225)',
+                                             line = list(color = 'rgb(8,48,107)', width = 1.5)))
+      fig <- fig %>% layout(title = title,
+                            barmode = 'group',
+                            xaxis = list(title = ""),
+                            yaxis = list(title = ""))
+    }
+    
+    
+  })
   observeEvent(input$summary_data_type,{
     
     
   })
   
-  output$summary_table <- DT::renderDataTable(val$cluster_wise_summary,
-                                              options = list(paging = F, dom = 't'),
-                                              #,scrollX = TRUE
-                                              rownames = FALSE)
+  # output$summary_table <- DT::renderDataTable(print_CWS(val$cluster_wise_summary, as.integer(input$day_type)),
+  #                                             options = list(paging = F, dom = 't'),
+  #                                             #,scrollX = TRUE
+  #                                             rownames = FALSE)
   output$head_count <- renderText({ 
     req(val$cluster_wise_summary)
     round(sum(val$cluster_wise_summary$`Head Count`),0) })
