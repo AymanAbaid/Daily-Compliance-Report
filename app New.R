@@ -20,6 +20,9 @@ library(plotly)
 library("webshot")
 library("googledrive")
 library(easycsv)
+library("tools")
+
+
 get_mapping <- function(){
   Mapping <- read_excel("Input Files/Mapping.xlsx")
   Mapping <- Mapping[,c("JIRA Projects Name","Cluster Group Name","PMO Projects Name")]
@@ -58,11 +61,10 @@ pre_process_jira_data  <- function(jira_data){
   return(jira_data)
 }
 pre_process_pmo_data<- function(alloc_data){
-  alloc_data =alloc_data[,c("Groups", "Resource Name" , "Emp Code","Team","Reporting TL","%Allocated","Project Name")]
-  alloc_data$`Id` =alloc_data$`Emp Code`
+  alloc_data =alloc_data[,c("Groups", "Resource Name" , "Emp Code","Team","Reporting TL","%Allocated","Project Name","Email")]
   alloc_data$`Emp Code` =  apply(data.frame(alloc_data$`Emp Code`),1,function(x)gsub('.*-', '',x))
   ######Adding Allocation % for allocation records to same clusters
-  alloc_data = alloc_data %>% group_by(`Groups`, `Emp Code`,Team,`Project Name` ,`Resource Name` )%>% 
+  alloc_data = alloc_data %>% group_by(`Groups`, `Emp Code`,Team,`Project Name` ,`Resource Name`,`Email` )%>% 
     summarise(`%Allocated` = sum(`%Allocated`))
   colnames(alloc_data)[colnames(alloc_data)=="Project Name"] = "PMO Projects Name"
   
@@ -101,33 +103,45 @@ calculate_cluster_summary <- function(cluster_wise_resource_logging,Hours )
   temp=cluster_wise_resource_logging
   temp$`Sum of Worked-Total per alloc`= ((temp$`%Allocated`)/100)*temp$`Sum of Worked-Total`
   temp$`JLA Hours-Total per alloc`= ((temp$`%Allocated`)/100)*temp$`JLA Hours-Total`
+  temp[is.na(temp)]=0
+  ##Capping
+  temp$`JLA_hours_cp` = ifelse (temp$`JLA_hours`>temp$`Available Hours`
+                                ,temp$`Available Hours`
+                                ,temp$`JLA_hours`)
+  
+  temp$`Jira_hours_cp` = ifelse (temp$`Jira_hours`>temp$`Available Hours`
+                                 ,temp$`Available Hours`,
+                                 temp$`Jira_hours`)
+  # 
+  temp$`JLA Hours-Total per alloc_cp` = ifelse (temp$`JLA Hours-Total per alloc`>temp$`Available Hours`, temp$`Available Hours`
+                                                ,temp$`JLA Hours-Total per alloc`)
+  
+  temp$`Sum of Worked-Total per alloc_cp` = ifelse (temp$`Sum of Worked-Total per alloc`>temp$`Available Hours`, 
+                                                    temp$`Available Hours`,
+                                                    temp$`Sum of Worked-Total per alloc`)
   
   cluster_wise_summary = temp %>% group_by(`Groups`)%>%
-    summarise(`JLA Hours-Cluster` = sum(`JLA_hours`, na.rm=TRUE),
-              `Sum of Worked-Cluster` = sum(`Jira_hours`, na.rm=TRUE),
+    summarise(`JLA Hours-Cluster` = sum(`JLA_hours_cp`, na.rm=TRUE),
+              `Sum of Worked-Cluster` = sum(`Jira_hours_cp`, na.rm=TRUE),
+              `Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc_cp`, na.rm=TRUE),
+              `JLA Hours-Total` = sum(`JLA Hours-Total per alloc_cp`, na.rm=TRUE),
               `Available Hours` = sum(`Available Hours`, na.rm=TRUE),
-              `Available Hours` = sum(`Available Hours`, na.rm=TRUE),
-              `Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc`, na.rm=TRUE),
-              `JLA Hours-Total` = sum(`JLA Hours-Total per alloc`, na.rm=TRUE)
+              `Head Count` = sum(`%Allocated`, na.rm=TRUE)/100
+              
     )
-  cluster_wise_summary$`Head Count` =  cluster_wise_summary$`Available Hours`/Hours
+  # cluster_wise_summary$`Available Hours` =  round(cluster_wise_summary$`Head Count`)*Hours
   
-  # 
-  # 
-  # #[!duplicated(cluster_wise_resource_logging$`Emp Code`),]
-  # temp2  = temp %>% group_by(`Groups`)%>%
-  #   summarise(`Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc`, na.rm=TRUE),
-  #             `JLA Hours-Total` = sum(`JLA Hours-Total per alloc`, na.rm=TRUE),)
-  # cluster_wise_summary= merge(cluster_wise_summary,temp2)  
-  # 
+  cluster_wise_summary$`Jira Delta` =  cluster_wise_summary$`Sum of Worked-Total`-cluster_wise_summary$`Sum of Worked-Cluster`
+  cluster_wise_summary$`JLA Delta` =  cluster_wise_summary$`JLA Hours-Total`-cluster_wise_summary$`JLA Hours-Cluster`
   
   # cluster_wise_summary$`Daily %age` = 
   #   round((cluster_wise_summary$`Sum of Worked-Total`/cluster_wise_summary$`Available Hours`)*100,0)
-  # cluster_wise_summary$`JLA %age` = round((cluster_wise_summary$`JLA Hours-Cluster`/cluster_wise_summary$`Available Hours`)*100,0)
-  
+  # cluster_wise_summary$`JLA %age` = round((cluster_wise_summary$`JLA Hours-Total`/cluster_wise_summary$`Available Hours`)*100,0)
+  # 
   cluster_wise_summary$`Daily %age` = 
-    round((cluster_wise_summary$`Sum of Worked-Total`/cluster_wise_summary$`Available Hours`)*100,0)
-  cluster_wise_summary$`JLA %age` = round((cluster_wise_summary$`JLA Hours-Total`/cluster_wise_summary$`Available Hours`)*100,0)
+    (cluster_wise_summary$`Sum of Worked-Total`/cluster_wise_summary$`Available Hours`)*100
+  cluster_wise_summary$`JLA %age` = (cluster_wise_summary$`JLA Hours-Total`/cluster_wise_summary$`Available Hours`)*100
+  
   
   #Grand Total
   cluster_wise_summary[nrow(cluster_wise_summary)+1,] = NA
@@ -142,7 +156,7 @@ calculate_cluster_summary <- function(cluster_wise_resource_logging,Hours )
   cluster_wise_summary[cluster_wise_summary$Groups=="Grand Total",]$`JLA %age` =100*(
     as.numeric(cluster_wise_summary[cluster_wise_summary$Groups=="Grand Total",]$`JLA Hours-Total`)/as.numeric(cluster_wise_summary[cluster_wise_summary$Groups=="Grand Total",]$`Available Hours`))
   
-  cluster_wise_summary[,-1]= round(cluster_wise_summary[,-1],0)
+  # cluster_wise_summary[,-1]= round(cluster_wise_summary[,-1],0)
   return(cluster_wise_summary)
 }  
 
@@ -150,17 +164,36 @@ calculate_team_summary<- function(cluster_wise_resource_logging,Hours){
   temp=cluster_wise_resource_logging
   temp$`Sum of Worked-Total per alloc`= ((temp$`%Allocated`)/100)*temp$`Sum of Worked-Total`
   temp$`JLA Hours-Total per alloc`= ((temp$`%Allocated`)/100)*temp$`JLA Hours-Total`
+  temp[is.na(temp)]=0
+  ##Capping
+  temp$`JLA_hours_cp` = ifelse (temp$`JLA_hours`>temp$`Available Hours`
+                                ,temp$`Available Hours`
+                                ,temp$`JLA_hours`)
+  
+  temp$`Jira_hours_cp` = ifelse (temp$`Jira_hours`>temp$`Available Hours`
+                                 ,temp$`Available Hours`,
+                                 temp$`Jira_hours`)
+  # 
+  temp$`JLA Hours-Total per alloc_cp` = ifelse (temp$`JLA Hours-Total per alloc`>temp$`Available Hours`, temp$`Available Hours`
+                                                ,temp$`JLA Hours-Total per alloc`)
+  
+  temp$`Sum of Worked-Total per alloc_cp` = ifelse (temp$`Sum of Worked-Total per alloc`>temp$`Available Hours`, 
+                                                    temp$`Available Hours`,
+                                                    temp$`Sum of Worked-Total per alloc`)
   
   team_wise_summary = temp %>% group_by(`Team`)%>%
-    summarise(`JLA Hours-Cluster` = sum(`JLA_hours`, na.rm=TRUE),
-              `Sum of Worked-Cluster` = sum(`Jira_hours`, na.rm=TRUE),
+    summarise(`JLA Hours-Cluster` = sum(`JLA_hours_cp`, na.rm=TRUE),
+              `Sum of Worked-Cluster` = sum(`Jira_hours_cp`, na.rm=TRUE),
+              `Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc_cp`, na.rm=TRUE),
+              `JLA Hours-Total` = sum(`JLA Hours-Total per alloc_cp`, na.rm=TRUE),
               `Available Hours` = sum(`Available Hours`, na.rm=TRUE),
-              `Available Hours` = sum(`Available Hours`, na.rm=TRUE),
-              `Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc`, na.rm=TRUE),
-              `JLA Hours-Total` = sum(`JLA Hours-Total per alloc`, na.rm=TRUE)
+              `Head Count` = sum(`%Allocated`, na.rm=TRUE)/100
+              
     )
-  team_wise_summary$`Head Count` =  team_wise_summary$`Available Hours`/Hours
+  # team_wise_summary$`Head Count` =  round(team_wise_summary$`Available Hours`/Hours)
+  # team_wise_summary$`Available Hours` =  round(team_wise_summary$`Head Count`)*Hours
   
+
   team_wise_summary$`Daily %age` = 
     round((team_wise_summary$`Sum of Worked-Total`/team_wise_summary$`Available Hours`)*100,0)
   team_wise_summary$`JLA %age` = round((team_wise_summary$`JLA Hours-Cluster`/team_wise_summary$`Available Hours`)*100,0)
@@ -183,7 +216,7 @@ calculate_team_summary<- function(cluster_wise_resource_logging,Hours){
   team_wise_summary[team_wise_summary$Team=="Grand Total",]$`JLA %age` =100*(
     as.numeric(team_wise_summary[team_wise_summary$Team=="Grand Total",]$`JLA Hours-Total`)/as.numeric(team_wise_summary[team_wise_summary$Team=="Grand Total",]$`Available Hours`))
   
-  team_wise_summary[,-1]= round(team_wise_summary[,-1],0)
+  # team_wise_summary[,-1]= round(team_wise_summary[,-1],0)
   
   return(team_wise_summary)
 }
@@ -193,16 +226,34 @@ calculate_project_summary<- function(cluster_wise_resource_logging,Hours){
   temp=cluster_wise_resource_logging
   temp$`Sum of Worked-Total per alloc`= ((temp$`%Allocated`)/100)*temp$`Sum of Worked-Total`
   temp$`JLA Hours-Total per alloc`= ((temp$`%Allocated`)/100)*temp$`JLA Hours-Total`
+  temp[is.na(temp)]=0
+  ##Capping
+  temp$`JLA_hours_cp` = ifelse (temp$`JLA_hours`>temp$`Available Hours`
+                                ,temp$`Available Hours`
+                                ,temp$`JLA_hours`)
+  
+  temp$`Jira_hours_cp` = ifelse (temp$`Jira_hours`>temp$`Available Hours`
+                                 ,temp$`Available Hours`,
+                                 temp$`Jira_hours`)
+  # 
+  temp$`JLA Hours-Total per alloc_cp` = ifelse (temp$`JLA Hours-Total per alloc`>temp$`Available Hours`, temp$`Available Hours`
+                                                ,temp$`JLA Hours-Total per alloc`)
+  
+  temp$`Sum of Worked-Total per alloc_cp` = ifelse (temp$`Sum of Worked-Total per alloc`>temp$`Available Hours`, 
+                                                    temp$`Available Hours`,
+                                                    temp$`Sum of Worked-Total per alloc`)
   
   project_wise_summary = temp %>% group_by(Groups,`PMO Projects Name`)%>%
-    summarise(`JLA Hours-Cluster` = sum(`JLA_hours`, na.rm=TRUE),
-              `Sum of Worked-Cluster` = sum(`Jira_hours`, na.rm=TRUE),
+    summarise(`JLA Hours-Cluster` = sum(`JLA_hours_cp`, na.rm=TRUE),
+              `Sum of Worked-Cluster` = sum(`Jira_hours_cp`, na.rm=TRUE),
+              `Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc_cp`, na.rm=TRUE),
+              `JLA Hours-Total` = sum(`JLA Hours-Total per alloc_cp`, na.rm=TRUE),
               `Available Hours` = sum(`Available Hours`, na.rm=TRUE),
-              `Available Hours` = sum(`Available Hours`, na.rm=TRUE),
-              `Sum of Worked-Total` = sum(`Sum of Worked-Total per alloc`, na.rm=TRUE),
-              `JLA Hours-Total` = sum(`JLA Hours-Total per alloc`, na.rm=TRUE)
+              `Head Count` = sum(`%Allocated`, na.rm=TRUE)/100
+              
     )
-  project_wise_summary$`Head Count` =  project_wise_summary$`Available Hours`/Hours
+  # project_wise_summary$`Head Count` =  round(project_wise_summary$`Available Hours`/Hours)
+  # project_wise_summary$`Available Hours` =  round(project_wise_summary$`Head Count`)*Hours
   
   project_wise_summary$`Daily %age` = 
     round((project_wise_summary$`Sum of Worked-Total`/project_wise_summary$`Available Hours`)*100,0)
@@ -226,7 +277,7 @@ calculate_project_summary<- function(cluster_wise_resource_logging,Hours){
   project_wise_summary[project_wise_summary$`PMO Projects Name`=="Grand Total",]$`JLA %age` =100*(
     as.numeric(project_wise_summary[project_wise_summary$`PMO Projects Name`=="Grand Total",]$`JLA Hours-Total`)/as.numeric(project_wise_summary[project_wise_summary$`PMO Projects Name`=="Grand Total",]$`Available Hours`))
   
-  project_wise_summary[,-(1:2)]= round(project_wise_summary[,-(1:2)],0)
+  # project_wise_summary[,-(1:2)]= round(project_wise_summary[,-(1:2)],0)
   project_wise_summary$Groups[nrow(project_wise_summary)]="Grand Total"
   
   return(project_wise_summary)
@@ -290,8 +341,8 @@ print_CWS<- function(cluster_wise_summary,Hours){
     cws_order=c("Groups","Head Count","Available Hours","Sum of Worked","JLA Hours","Mid-Day %age","JLA %age")
   }
   else{
-    cws_order=c("Groups","Head Count","Available Hours","Sum of Worked-Cluster","Sum of Worked-Total",
-                "JLA Hours-Cluster","JLA Hours-Total","Daily %age","JLA %age")
+    cws_order=c("Groups","Head Count","Available Hours","Sum of Worked-Cluster","Sum of Worked-Total", "Jira Delta",
+                "JLA Hours-Cluster","JLA Hours-Total","JLA Delta" ,"Daily %age","JLA %age")
     
   }
   
@@ -358,6 +409,19 @@ print_CWRL<- function(cluster_wise_resource_logging){
                "Sum of Worked-Total","JLA Hours-Cluster","JLA Hours-Total")
   CWRL=CWRL[,cwrl_order]
 }
+print_NC<- function(cluster_wise_resource_logging){
+  
+  CWRL=cluster_wise_resource_logging
+  colnames(CWRL)[colnames(CWRL)=="Jira_hours"] = "Sum of Worked-Cluster"
+  colnames(CWRL)[colnames(CWRL)=="JLA_hours"] = "JLA Hours-Cluster"
+  
+  
+  cwrl_order=c("Emp Code","Resource Name","Groups","PMO Projects Name", 
+               "Team","%Allocated","Available Hours","Sum of Worked-Cluster",
+               "Sum of Worked-Total","JLA Hours-Cluster","JLA Hours-Total","Email")
+  CWRL=CWRL[,cwrl_order]
+}
+
 print_bar_plot <- function(cluster_wise_summary){
   
   
@@ -402,13 +466,13 @@ ui <- dashboardPage(
         tabName = "upload_data",
         
         box( width=16,status = "primary",# solidHeader = TRUE, title="Table",
-             fileInput("pmo_input", "Upload PMO File"),
+             fileInput("pmo_input", "Upload PMO File", accept = c( "xls/xlsx") ),
              
              br(),
              # tableOutput("table1")
         ),
         box( width=16, status = "primary" ,# solidHeader = TRUE, title="Table",
-             fileInput("jira_input", "Upload Jira File"),
+             fileInput("jira_input", "Upload Jira File" , accept = c( "csv")),
              br(),
              # tableOutput("table1")
         ),
@@ -460,7 +524,7 @@ server <- function(input, output) {
   ####### Initializing Variables
   alloc_data = jira_data = NULL
   val <- reactiveValues()
-  val$cluster_wise_summary = data.frame()
+  val$cluster_wise_summary = val$non_compliant=data.frame()
   val$cluster_wise_resource_logging = data.frame()
   val$hours_df= data.frame()
   val$cluster_wise_activity_seg = data.frame
@@ -474,15 +538,37 @@ server <- function(input, output) {
   
   ###### Save PMO input File
   observeEvent(input$pmo_input, {
+    if ( file_ext(input$pmo_input$name) =="xls" || file_ext(input$pmo_input$name) =="xlsx")
+    {
     val$pmo_input_file_name = input$pmo_input$name
     drive_upload(media = input$pmo_input$datapath,
                  name = input$pmo_input$name,overwrite=TRUE)
+    }
+    else{
+      showModal(modalDialog(
+        title = "Error",
+        paste("Please upload PMO file with extension xls or xlsx"),
+        easyClose = TRUE,
+        footer = NULL
+      ))
+    }
   })
   ###### Save Jira input File
   observeEvent(input$jira_input, {
+    if ( file_ext(input$jira_input$name) =="csv" )
+    {
     val$jira_file_name =input$jira_input$name
     drive_upload(media = input$jira_input$datapath,
                  name = input$jira_input$name,overwrite=TRUE)
+    }
+    else{
+      showModal(modalDialog(
+        title = "Error",
+        paste("Please upload Jira file with extension csv"),
+        easyClose = TRUE,
+        footer = NULL
+      ))
+    }
   })
   
   observeEvent(input$analysis, {
@@ -529,7 +615,9 @@ server <- function(input, output) {
         jira_activity_data= jira_data[,c("Emp Code","Hours", "Project Name","Activity Type" )]
         jira_data =jira_data[,c("Emp Code","Full name","Hours", "Team", "JLA Activity Log", "Project Name" )]
         
-        alloc_data = pre_process_pmo_data(alloc_data)
+        alloc_data <- pre_process_pmo_data(alloc_data)
+        alloc_email = alloc_data[,c("Emp Code","Email"  )]
+        alloc_data = alloc_data[,c("Groups","Emp Code","Team","PMO Projects Name","Resource Name","%Allocated")]
         
         jira_data =merge(Mapping, jira_data, by.x="JIRA Projects Name",by.y="Project Name",all.y=TRUE)
         
@@ -547,6 +635,11 @@ server <- function(input, output) {
                                               , all=TRUE )
         
         val$cluster_wise_resource_logging = calculate_resource_allocation(cluster_wise_resource_logging,JLA_total_hours,as.integer(input$day_type))
+        # Resource with ZERO jira Compliance -------------------------------------------------
+        non_compliant = val$cluster_wise_resource_logging[val$cluster_wise_resource_logging$`Sum of Worked-Total`==0,]
+        alloc_email = alloc_email[!duplicated(alloc_email$`Emp Code`),]
+        val$non_compliant =merge(non_compliant, alloc_email,by="Emp Code", all.x = TRUE )
+        
         # Cluster Summary Statistics -------------------------------------------------
         val$cluster_wise_summary = calculate_cluster_summary(val$cluster_wise_resource_logging,as.integer(input$day_type))
         # Team Summary Statistics -------------------------------------------------
@@ -618,48 +711,47 @@ server <- function(input, output) {
       CWRL =print_CWRL(val$cluster_wise_resource_logging)
       TWS = print_TWS(val$team_wise_summary)
       PWS = print_PWS(val$project_wise_summary)
-      
+      NC = print_NC(val$non_compliant)
       # set path
       temp <- setwd(tempdir())
       on.exit(setwd(temp))
       
       if(as.integer(input$day_type)!=8)
       {
-        wb <- openxlsx::createWorkbook("Summary")
-        openxlsx::addWorksheet(wb, sheet = "Summary", gridLines = TRUE)
-        openxlsx::addWorksheet(wb, "Cluster wise resource logging", gridLines = TRUE)
+        wb <- openxlsx::createWorkbook()
+        addWorksheet(wb,"Summary" )
+        writeDataTable(wb, "Summary", startCol = 1,   startRow = 1, x = as.data.frame(CWS), tableStyle = "TableStyleMedium9")
+
+        addWorksheet(wb, "Cluster wise resource logging")
+        writeDataTable(wb, "Cluster wise resource logging", startCol = 1,   startRow = 1, x = as.data.frame(CWRL), tableStyle = "TableStyleMedium9")
         
-        openxlsx::writeData(wb, sheet = "Summary", CWS, rowNames = FALSE)
-        openxlsx::writeData(wb, sheet = "Cluster wise resource logging" , CWRL, rowNames = FALSE)
-        
-        wb=get_table_style(wb, 1, nrow(CWS),ncol(CWS))
-        wb=get_table_style(wb, 2, nrow(CWRL),ncol(CWRL))
-        openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
+
+        openxlsx::saveWorkbook(wb, file = file, overwrite = TRUE)
         
         
       }
       else
       {
-        wb = createWorkbook()
-        sheet = createSheet(wb, "Summary")
         
-        addDataFrame(as.data.frame(CWS), sheet=sheet, startColumn=1, row.names=FALSE)
-        addDataFrame(as.data.frame(val$hours_df), sheet=sheet, startColumn=15, row.names=FALSE)
-        addDataFrame(as.data.frame(TWS), sheet=sheet, startRow = 18, startColumn=1, row.names=FALSE)
-        addDataFrame(as.data.frame(PWS), sheet=sheet, startRow = 50, startColumn=1, row.names=FALSE)
+        wb <- openxlsx::createWorkbook()
         
-        sheet = createSheet(wb, "Cluster wise resource logging")
-        addDataFrame(as.data.frame(CWRL), sheet=sheet, startColumn=1, row.names=FALSE)
-        
-        sheet = createSheet(wb, "Cluster wise activity")
-        addDataFrame(as.data.frame(val$cluster_wise_activity_seg), sheet=sheet, startColumn=1, row.names=FALSE)
-        
-        saveWorkbook(wb, file)
-        
-        # list_of_datasets <- list("Summary" = CWS,
-        #                        "Cluster wise resource logging" = CWRL,
-        #                        "Cluster wise activity"=val$cluster_wise_activity_seg,
-        #                        "Time Log. Head Count"= val$hours_df)
+        addWorksheet(wb,"Summary" )
+        writeDataTable(wb, "Summary", startCol = 1,   startRow = 1, x = as.data.frame(CWS), tableStyle = "TableStyleMedium9")
+        writeDataTable(wb, "Summary",startCol = 15,   startRow = 1, x = as.data.frame(val$hours_df), tableStyle = "TableStyleMedium9")
+        writeDataTable(wb, "Summary",startCol = 1,   startRow = 18, x = as.data.frame(TWS), tableStyle = "TableStyleMedium9")
+        writeDataTable(wb, "Summary",startCol = 1,   startRow = 50, x = as.data.frame(PWS), tableStyle = "TableStyleMedium9")
+
+        addWorksheet(wb, "Cluster wise resource logging")
+        writeDataTable(wb, "Cluster wise resource logging", startCol = 1,   startRow = 1, x = as.data.frame(CWRL), tableStyle = "TableStyleMedium9")
+
+        addWorksheet(wb, "Cluster wise activity")
+        writeDataTable(wb, "Cluster wise activity", startCol = 1,   startRow = 1,
+                       x = as.data.frame(val$cluster_wise_activity_seg), tableStyle = "TableStyleMedium9")
+
+        addWorksheet(wb, "Non Compliant Resources")
+        writeDataTable(wb, "Non Compliant Resources", startCol = 1,   startRow = 1,
+                       x = as.data.frame(NC), tableStyle = "TableStyleMedium9")
+        openxlsx::saveWorkbook(wb, file = file, overwrite = TRUE)
       }
       
       
@@ -673,6 +765,7 @@ server <- function(input, output) {
     {
       
       cluster_wise_summary =val$cluster_wise_summary
+      cluster_wise_summary[,-1]= round(cluster_wise_summary[,-1],0)
       if(input$day_type ==8)
       {title = paste( "Daily Jira Compliance ",as.character(input$date),sep="" )}
       else 
