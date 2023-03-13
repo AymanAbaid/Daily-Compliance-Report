@@ -1,0 +1,14 @@
+name: Daily-Compliance-Report
+title: Daily-Compliance-Report
+username:
+account: jla-stats
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 8231623
+bundleId: 6813832
+url: https://jla-stats.shinyapps.io/Daily-Compliance-Report/
+when: 1675664243.94683
+lastSyncTime: 1675664243.94686
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: backup/app New.R|plotly3c98763134ef_files

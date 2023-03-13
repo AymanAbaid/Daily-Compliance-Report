@@ -1,0 +1,14 @@
+name: Daily-Compliance-Report
+title: Daily-Compliance-Report
+username:
+account: jira-reporting
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 8231656
+bundleId: 6950545
+url: https://jira-reporting.shinyapps.io/Daily-Compliance-Report/
+when: 1678687657.44548
+lastSyncTime: 1678687657.44551
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: Employee Allocations.xls|Input Files/~$Team_NFS_26_Jan_23_26_Jan_23.xlsx|Input Files/Reference Sheet.xls|Team_NFS_10_Mar_23_10_Mar_23.csv|Team_NFS2023-03-06-2023-03-10.csv|test.csv
